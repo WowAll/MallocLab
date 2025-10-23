@@ -24,11 +24,11 @@
  ********************************************************/
 team_t team = {
     /* Team name */
-    "ateam",
+    "firstteam",
     /* First member's full name */
-    "Harry Bovik",
+    "Yoonbeom Cho",
     /* First member's email address */
-    "bovik@cs.cmu.edu",
+    "whdbsqja1@gmail.com",
     /* Second member's full name (leave blank if none) */
     "",
     /* Second member's email address (leave blank if none) */
@@ -36,6 +36,23 @@ team_t team = {
 
 /* single word (4) or double word (8) alignment */
 #define ALIGNMENT 8
+
+#define WSIZE 4
+#define DSIZE 8
+#define CHUNKSZ (1 << 12)
+
+#define MAX(x, y) ((x) > (y) ? (x) : (y))
+
+/* Pack a size and allocation flag into a single word */
+#define PACK(size, alloc) ((size) | (alloc))
+
+/* Read and write a size_t at address p */
+#define GET(p) (*(size_t *)(p))
+#define PUT(p, val) (*(size_t *)(p) = (val))
+
+/* Read the size and allocated fields from a word */
+#define GET_SIZE(p) (GET(p) & ~0x7)
+#define GET_ALLOC(p) (GET(p) & 0x1)
 
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
@@ -47,6 +64,10 @@ team_t team = {
  */
 int mm_init(void)
 {
+    if ((heap_listp = mem_sbrk(4)) == (void *)-1)
+        return -1;
+    PUT(heap_listp, 0);
+    PUT(heap_listp + SIZE_T_SIZE, MAX_HEAP - SIZE_T_SIZE);
     return 0;
 }
 
