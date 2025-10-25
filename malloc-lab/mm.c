@@ -62,17 +62,17 @@ team_t team = {
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
-/* rounds up to the nearest multiple of ALIGNMENT */
-#define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
+#define PREV_FREE_BLKP(bp) (*(void **)(bp))
+#define NEXT_FREE_BLKP(bp) (*(void **)(bp) + WSIZE)
 
-#define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
 static void *extend_heap(size_t words);
 static void *coalesce(void *ptr);
 static void *find_fit(size_t asize);
 static void place(void *ptr, size_t size);
 
-static char *heap_listp;
+static void *heap_listp;
+static void *last_bp;
 
 /*
  * mm_init - initialize the malloc package.
@@ -85,6 +85,8 @@ int mm_init(void) {
     PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1));
     PUT(heap_listp + (3 * WSIZE), PACK(0, 1));
     heap_listp += (2 * WSIZE);
+
+    last_bp = heap_listp;
 
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
         return -1;
@@ -100,9 +102,7 @@ void *mm_malloc(size_t size)
 {
     size_t asize;
     size_t extendsize;
-    char *bp;
-
-    printf("size: %zu\n", size);
+    void *bp;
 
     /* Ignore spurious requests */
     if (size == 0)
@@ -110,7 +110,7 @@ void *mm_malloc(size_t size)
 
     /* Adjust block size to include overhead and alignment reqs.*/
     if (size <= DSIZE)
-        asize = 2 * DSIZE;
+        asize = 2 * DSIZE; // 최소 16바이트 (헤더 + 풋터 포함)
     else
         asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
 
@@ -129,17 +129,7 @@ void *mm_malloc(size_t size)
     place(bp, asize);
     return bp;
 
-    /*
-    int newsize = ALIGN(size + SIZE_T_SIZE);
-    void *p = mem_sbrk(newsize);
-    if (p == (void *)-1)
-        return NULL;
-    else
-    {
-        *(size_t *)p = size;
-        return (void *)((char *)p + SIZE_T_SIZE);
-    }
-    */
+
 }
 
 void *mm_realloc(void *ptr, size_t size)
@@ -151,9 +141,9 @@ void *mm_realloc(void *ptr, size_t size)
     size_t newsize;
 
     if (size <= DSIZE)
-        newsize = 2 * DSIZE;
+        newsize = 2 * DSIZE; // 최소 16바이트 (헤더 + 풋터 포함)
     else
-        newsize = DSIZE * ((size + (DSIZE - 1)) / DSIZE);
+        newsize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
 
     if (newsize <= oldsize)  // 기존 블록이 충분히 큼
         return ptr;
@@ -204,7 +194,7 @@ void mm_free(void *bp)
 
 static void *coalesce(void *bp)
 {
-    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
+    size_t prev_alloc = GET_ALLOC(HDRP(PREV_BLKP(bp)));
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
     size_t size = GET_SIZE(HDRP(bp));
 
@@ -228,24 +218,38 @@ static void *coalesce(void *bp)
 
     else {                                     /* Case 4 */
         size += GET_SIZE(HDRP(PREV_BLKP(bp))) +
-                GET_SIZE(HDRP(NEXT_BLKP(bp)));
+                GET_SIZE(FTRP(NEXT_BLKP(bp)));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
     }
-
+    last_bp = bp;
 
     return bp;
 }
 
-
 static void *find_fit(size_t asize) {
     void *bp;
 
-    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+    if (last_bp == NULL)
+        last_bp = heap_listp;
+
+    for (bp = last_bp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
         if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
+        {
+            last_bp = bp;
             return bp;
+        }
     }
+
+    for (bp = heap_listp; bp < last_bp; bp = NEXT_BLKP(bp)) {
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
+        {
+            last_bp = bp;
+            return bp;
+        }
+    }
+
     return NULL;
 }
 
@@ -258,8 +262,10 @@ static void place(void *bp, size_t asize) {
         bp = NEXT_BLKP(bp);
         PUT(HDRP(bp), PACK(csize - asize, 0));
         PUT(FTRP(bp), PACK(csize - asize, 0));
+        last_bp = bp;
     } else {
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
+        last_bp = NEXT_BLKP(bp);
     }
 }
