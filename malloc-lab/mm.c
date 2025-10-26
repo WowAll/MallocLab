@@ -228,7 +228,13 @@ static void *coalesce(void *bp)
     return bp;
 }
 
-static void *find_fit(size_t asize) {
+static void *first_fit(size_t size) {
+    void *bp;
+
+    for (bp = heap_listp; GET_SIZE)
+}
+
+static void *next_fit(size_t asize) {
     void *bp;
 
     if (last_bp == NULL)
