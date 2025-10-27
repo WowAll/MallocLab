@@ -17,7 +17,7 @@ team_t team = {
 
 #define WSIZE 4                          /* Word size in bytes */
 #define DSIZE 8                          /* Double word size */
-#define CHUNKSIZE (1 << 12)              /* Extend heap by this amount */
+#define CHUNKSIZE (1 << 8)              /* Extend heap by this amount */
 #define ALIGNMENT 8                      /* Alignment requirement */
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
@@ -236,7 +236,7 @@ static void *coalesce(void *bp) {
     else {                                     /* Case 4: Both free */
         remove_from_free_list(PREV_BLKP(bp));
         remove_from_free_list(NEXT_BLKP(bp));
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
+        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(HDRP(NEXT_BLKP(bp)));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
