@@ -24,7 +24,7 @@ team_t team = {
 /* Basic constants and macros */
 #define WSIZE 4                          /* Word size in bytes */
 #define DSIZE 8                          /* Double word size */
-#define CHUNKSIZE (1 << 12)              /* Extend heap by this amount */
+#define CHUNKSIZE (1 << 8)              /* Extend heap by this amount */
 #define ALIGNMENT 8                      /* Alignment requirement */
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
@@ -267,6 +267,8 @@ static void *find_fit(size_t asize) {
         if ((best_bp == NULL || GET_SIZE(HDRP(bp)) < best_size) && GET_SIZE(HDRP(bp)) >= asize) {
             best_bp = bp;
             best_size = GET_SIZE(HDRP(bp));
+            if (best_size == asize)
+                break;
         }
     }
     return best_bp;
@@ -289,7 +291,8 @@ static void place(void *bp, size_t asize) {
          
         /* Add remainder to free list */
         add_to_free_list(next_bp);
-    } else {
+    }
+    else {
         /* Use entire block */
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
@@ -300,16 +303,16 @@ static void place(void *bp, size_t asize) {
  * add_to_free_list - Add block to free list (LIFO policy)
  */
 static void add_to_free_list(void *bp) {
-   if (bp == NULL)
+    if (bp == NULL)
        return;
     
-   SET_NEXT_FREE(bp, free_listp);
-   SET_PREV_FREE(bp, NULL);
+    SET_NEXT_FREE(bp, free_listp);
+    SET_PREV_FREE(bp, NULL);
     
-   if (free_listp != NULL)
+    if (free_listp != NULL)
        SET_PREV_FREE(free_listp, bp);
     
-   free_listp = bp;
+    free_listp = bp;
 }
  
 /*
