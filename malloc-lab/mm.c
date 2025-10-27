@@ -293,43 +293,64 @@
      }
  }
  
-  static void add_to_free_list(void *bp) {
-    if (bp == NULL) return;
+  // 주소순 정렬 + 인접 free 병합(coalesce) 삽입
+static void add_to_free_list(void *bp) {
+    if (!bp) return;
 
-    // ① 비어있으면 bp가 head
-    if (free_listp == NULL) {
-        SET_PREV_FREE(bp, NULL);
-        SET_NEXT_FREE(bp, NULL);
-        free_listp = bp;
-        return;
-    }
+    // 현재 bp는 헤더/푸터에 size|alloc비트가 이미 0으로 세팅되어 있다고 가정
+    size_t size = GET_SIZE(HDRP(bp));
 
-    // ② prev/current로 한 칸씩 이동하며 주소 오름차순 위치 찾기
+    // (1) 주소순 위치 탐색
     void *prev = NULL;
     void *current = free_listp;
-    while (current && (current < bp)) {
+    while (current && current < bp) {
         prev = current;
         current = GET_NEXT_FREE(current);
     }
-    // 루프 종료 후 의미:
-    //   prev    = bp보다 "작은" 마지막 노드 (없으면 NULL)
-    //   current = bp보다 "크거나 같은" 첫 노드 (없으면 tail 삽입)
+    // now: prev < bp <= current (주소 기준)
 
-    // ③ head 삽입
-    if (prev == NULL) {
-        SET_PREV_FREE(bp, NULL);
-        SET_NEXT_FREE(bp, current);
-        SET_PREV_FREE(current, bp);
-        free_listp = bp;
-        return;
+    // (2) 좌/우 물리 이웃과 병합 시도
+    // prev와 인접?
+    if (prev && ((char *)prev + GET_SIZE(HDRP(prev)) == (char *)bp)) {
+        // prev를 리스트에서 제거 후 병합
+        void *prev_prev = GET_PREV_FREE(prev); // 삽입 재구성을 위해 저장
+        remove_from_free_list(prev);
+
+        size += GET_SIZE(HDRP(prev));
+        bp = prev; // 병합 시 시작 주소는 prev로 이동
+
+        // 병합된 새 prev 후보는 prev_prev (주소상 더 작은 쪽)
+        prev = prev_prev;
     }
 
-    // ④ 중간/꼬리 삽입
-    SET_NEXT_FREE(bp, current);
-    SET_PREV_FREE(bp, prev);
-    SET_NEXT_FREE(prev, bp);
-    if (current)
-        SET_PREV_FREE(current, bp);
+    // current와 인접?
+    if (current && ((char *)bp + size == (char *)current)) {
+        // current를 리스트에서 제거 후 병합
+        void *current_next = GET_NEXT_FREE(current); // 이후 이어줄 대상
+        remove_from_free_list(current);
+
+        size += GET_SIZE(HDRP(current));
+        current = current_next; // 오른쪽 이웃 다음 노드로 당겨옴
+    }
+
+    // (3) 병합 결과를 헤더/푸터에 반영
+    PUT(HDRP(bp), PACK(size, 0));
+    PUT(FTRP(bp), PACK(size, 0));
+
+    // (4) 최종 블록을 주소순으로 prev와 current 사이에 삽입
+    if (prev == NULL) {
+        // head 삽입
+        SET_PREV_FREE(bp, NULL);
+        SET_NEXT_FREE(bp, current);
+        if (current) SET_PREV_FREE(current, bp);
+        free_listp = bp;
+    } else {
+        // 중간/꼬리 삽입
+        SET_NEXT_FREE(bp, current);
+        SET_PREV_FREE(bp, prev);
+        SET_NEXT_FREE(prev, bp);
+        if (current) SET_PREV_FREE(current, bp);
+    }
 }
  
  /*
