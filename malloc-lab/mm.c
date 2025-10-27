@@ -322,14 +322,12 @@ static void remove_from_free_list(void *bp) {
     void *prev = GET_PREV_FREE(bp);
     void *next = GET_NEXT_FREE(bp);
     
-    if (prev == NULL) {
+    if (prev == NULL)
         /* bp is first block in free list */
         free_listp = next;
-    } else {
+    else
         SET_NEXT_FREE(prev, next);
-    }
     
-    if (next != NULL) {
+    if (next != NULL)
         SET_PREV_FREE(next, prev);
-    }
 }
