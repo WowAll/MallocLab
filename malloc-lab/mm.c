@@ -1,9 +1,3 @@
-/*
- * mm.c - Explicit Free List Memory Allocator
- * 
- * Implementation uses doubly-linked explicit free list with LIFO policy.
- * Supports 32-bit and 64-bit systems automatically.
- */
  #include <stdio.h>
  #include <stdlib.h>
  #include <assert.h>
@@ -21,7 +15,6 @@
      ""
  };
  
- /* Basic constants and macros */
  #define WSIZE 4                          /* Word size in bytes */
  #define DSIZE 8                          /* Double word size */
  #define CHUNKSIZE (1 << 12)              /* Extend heap by this amount */
@@ -297,21 +290,44 @@
      }
  }
  
- /*
-  * add_to_free_list - Add block to free list (LIFO policy)
-  */
- static void add_to_free_list(void *bp) {
-     if (bp == NULL)
-         return;
-     
-     SET_NEXT_FREE(bp, free_listp);
-     SET_PREV_FREE(bp, NULL);
-     
-     if (free_listp != NULL)
-         SET_PREV_FREE(free_listp, bp);
-     
-     free_listp = bp;
- }
+  static void add_to_free_list(void *bp) {
+    if (bp == NULL) return;
+
+    // ① 비어있으면 bp가 head
+    if (free_listp == NULL) {
+        SET_PREV_FREE(bp, NULL);
+        SET_NEXT_FREE(bp, NULL);
+        free_listp = bp;
+        return;
+    }
+
+    // ② prev/current로 한 칸씩 이동하며 주소 오름차순 위치 찾기
+    void *prev = NULL;
+    void *current = free_listp;
+    while (current && (current < bp)) {
+        prev = current;
+        current = GET_NEXT_FREE(current);
+    }
+    // 루프 종료 후 의미:
+    //   prev    = bp보다 "작은" 마지막 노드 (없으면 NULL)
+    //   current = bp보다 "크거나 같은" 첫 노드 (없으면 tail 삽입)
+
+    // ③ head 삽입
+    if (prev == NULL) {
+        SET_PREV_FREE(bp, NULL);
+        SET_NEXT_FREE(bp, current);
+        SET_PREV_FREE(current, bp);
+        free_listp = bp;
+        return;
+    }
+
+    // ④ 중간/꼬리 삽입
+    SET_NEXT_FREE(bp, current);
+    SET_PREV_FREE(bp, prev);
+    SET_NEXT_FREE(prev, bp);
+    if (current)
+        SET_PREV_FREE(current, bp);
+}
  
  /*
   * remove_from_free_list - Remove block from free list
@@ -323,14 +339,11 @@
      void *prev = GET_PREV_FREE(bp);
      void *next = GET_NEXT_FREE(bp);
      
-     if (prev == NULL) {
-         /* bp is first block in free list */
+     if (prev == NULL)
          free_listp = next;
-     } else {
+     else
          SET_NEXT_FREE(prev, next);
-     }
      
-     if (next != NULL) {
+     if (next != NULL)
          SET_PREV_FREE(next, prev);
-     }
  }
