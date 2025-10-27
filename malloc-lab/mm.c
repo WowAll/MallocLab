@@ -246,21 +246,24 @@
      return bp;
  }
  
- /*
-  * find_fit - Find a fit for a block with asize bytes (First-fit search)
-  */
+/*
+ * find_fit - Find a fit for a block with asize bytes (Best-fit search)
+ */
  static void *find_fit(size_t asize) {
-     void *bp;
+    void *bp;
+
+    void *best_bp = NULL;
+    size_t best_size;
      
-     /* First-fit search */
-     for (bp = free_listp; bp != NULL; bp = GET_NEXT_FREE(bp)) {
-         if (GET_SIZE(HDRP(bp)) >= asize) {
-             return bp;
-         }
-     }
-     
-     return NULL;  /* No fit found */
- }
+    /* Best-fit search */
+    for (bp = free_listp; bp != NULL; bp = GET_NEXT_FREE(bp)) {
+        if ((best_bp == NULL || GET_SIZE(HDRP(bp)) < best_size) && GET_SIZE(HDRP(bp)) >= asize) {
+            best_bp = bp;
+            best_size = GET_SIZE(HDRP(bp));
+        }
+    }
+    return best_bp;
+}
  
  /*
   * place - Place block of asize bytes at start of free block bp
