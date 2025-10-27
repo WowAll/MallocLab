@@ -65,10 +65,18 @@ team_t team = {
 #define PREV_FREE_BLKP(bp) (*(void **)(bp))
 #define NEXT_FREE_BLKP(bp) (*(void **)(bp) + WSIZE)
 
+/* rounds up to the nearest multiple of ALIGNMENT */
+#define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
+
+#define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
+
 
 static void *extend_heap(size_t words);
 static void *coalesce(void *ptr);
 static void *find_fit(size_t asize);
+static void *first_fit(size_t asize);
+static void *next_fit(size_t asize);
+static void *best_fit(size_t asize);
 static void place(void *ptr, size_t size);
 
 static void *heap_listp;
@@ -112,7 +120,7 @@ void *mm_malloc(size_t size)
     if (size <= DSIZE)
         asize = 2 * DSIZE; // 최소 16바이트 (헤더 + 풋터 포함)
     else
-        asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
+        asize = ALIGN(size + SIZE_T_SIZE);
 
     /* Search the free list for a fit*/
     if ((bp = find_fit(asize)) != NULL) {
@@ -134,8 +142,8 @@ void *mm_malloc(size_t size)
 
 void *mm_realloc(void *ptr, size_t size)
 {
-    if (ptr == NULL) return mm_malloc(size);
     if (size == 0) { mm_free(ptr); return NULL; }
+    if (ptr == NULL) return mm_malloc(size);
 
     size_t oldsize = GET_SIZE(HDRP(ptr));
     size_t newsize;
@@ -143,7 +151,7 @@ void *mm_realloc(void *ptr, size_t size)
     if (size <= DSIZE)
         newsize = 2 * DSIZE; // 최소 16바이트 (헤더 + 풋터 포함)
     else
-        newsize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
+        newsize = ALIGN(size + SIZE_T_SIZE);
 
     if (newsize <= oldsize)  // 기존 블록이 충분히 큼
         return ptr;
@@ -228,10 +236,13 @@ static void *coalesce(void *bp)
     return bp;
 }
 
-static void *first_fit(size_t size) {
+static void *first_fit(size_t asize) {
     void *bp;
-
-    for (bp = heap_listp; GET_SIZE)
+    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
+            return bp;
+    }
+    return NULL;
 }
 
 static void *next_fit(size_t asize) {
@@ -257,6 +268,29 @@ static void *next_fit(size_t asize) {
     }
 
     return NULL;
+}
+
+static void *best_fit(size_t asize) {
+    void *bp;
+    void *best_bp = NULL;
+    size_t best_size = 0;
+
+    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
+        {
+            if (best_bp == NULL || GET_SIZE(HDRP(bp)) < best_size)
+            {
+                best_bp = bp;
+                best_size = GET_SIZE(HDRP(bp));
+            }
+        }
+    }
+
+    return best_bp;
+}
+
+static void *find_fit(size_t asize) {
+    return next_fit(asize);
 }
 
 static void place(void *bp, size_t asize) {
