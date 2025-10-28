@@ -150,29 +150,110 @@ void *mm_realloc(void *ptr, size_t size) {
     }
     
     size_t oldsize = GET_SIZE(HDRP(ptr));
-    size_t newsize;
+    size_t newsize = (size <= DSIZE) ? MIN_BLOCK_SIZE : ALIGN(size + DSIZE);
     
-    if (size <= DSIZE)
-        newsize = MIN_BLOCK_SIZE;
-    else
-        newsize = ALIGN(size + DSIZE);
-    
-    /* If new size is smaller or equal, return same pointer */
-    if (newsize <= oldsize)
+    /* If new size is the same, return same pointer */
+    if (newsize == oldsize)
         return ptr;
-    
-    /* Allocate new block */
+
+    /* Case 1: Shrinking the block */
+    if (newsize < oldsize) {
+        size_t remain = oldsize - newsize;
+        if (remain >= MIN_BLOCK_SIZE) {
+            PUT(HDRP(ptr), PACK(newsize, 1));
+            PUT(FTRP(ptr), PACK(newsize, 1));
+
+            void *tail = NEXT_BLKP(ptr);
+            PUT(HDRP(tail), PACK(remain, 0));
+            PUT(FTRP(tail), PACK(remain, 0));
+
+            coalesce(tail);
+        }
+        return ptr;
+    }
+
+    /* Case 2: Expanding - try to extend in place */
+    void *next = NEXT_BLKP(ptr);
+    void *prev = PREV_BLKP(ptr);
+    int prev_free = !GET_ALLOC(HDRP(prev));
+    int next_free = !GET_ALLOC(HDRP(next));
+
+    /* Case 2-1: Try to extend with adjacent next block */
+    if (next_free) {
+        size_t nsize = GET_SIZE(HDRP(next));
+        size_t total = oldsize + nsize;
+
+        if (total >= newsize) {
+            remove_from_free_list(next);
+
+            if (total - newsize >= MIN_BLOCK_SIZE) {
+                /* Split block - keep extra for new free block */
+                PUT(HDRP(ptr), PACK(newsize, 1));
+                PUT(FTRP(ptr), PACK(newsize, 1));
+
+                void *rem = NEXT_BLKP(ptr);
+                size_t rsize = total - newsize;
+                PUT(HDRP(rem), PACK(rsize, 0));
+                PUT(FTRP(rem), PACK(rsize, 0));
+                coalesce(rem);
+            } else {
+                /* Use entire combined block */
+                PUT(HDRP(ptr), PACK(total, 1));
+                PUT(FTRP(ptr), PACK(total, 1));
+            }
+            return ptr;
+        }
+    }
+
+    /* Case 2-2: Try to merge with prev and/or next */
+    if (prev_free || next_free) {
+        size_t psize = prev_free ? GET_SIZE(HDRP(prev)) : 0;
+        size_t nsize = next_free ? GET_SIZE(HDRP(next)) : 0;
+        size_t total = psize + oldsize + nsize;
+
+        if (total >= newsize) {
+            /* Merge blocks - might need to move data left */
+            void *start = prev_free ? prev : ptr;
+
+            /* Remove neighbors from free list */
+            if (prev_free) remove_from_free_list(prev);
+            if (next_free) remove_from_free_list(next);
+
+            /* Move data if expanding left */
+            if (start == prev) {
+                size_t payload = oldsize - DSIZE;
+                memmove(prev, ptr, payload);
+            }
+
+            /* Place the block - split if necessary */
+            if (total - newsize >= MIN_BLOCK_SIZE) {
+                PUT(HDRP(start), PACK(newsize, 1));
+                PUT(FTRP(start), PACK(newsize, 1));
+
+                void *rem = NEXT_BLKP(start);
+                size_t rsize = total - newsize;
+                PUT(HDRP(rem), PACK(rsize, 0));
+                PUT(FTRP(rem), PACK(rsize, 0));
+                coalesce(rem);
+            } else {
+                PUT(HDRP(start), PACK(total, 1));
+                PUT(FTRP(start), PACK(total, 1));
+            }
+            return start;
+        }
+    }
+
+    /* Case 3: Can't extend in place - allocate new block */
     void *newptr = mm_malloc(size);
     if (newptr == NULL)
         return NULL;
-    
-    /* Copy old data */
-    size_t copySize = oldsize - DSIZE;  /* Exclude header and footer */
+
+    /* Copy minimum of old and new sizes */
+    size_t copySize = oldsize - DSIZE;  /* payload size */
     if (size < copySize)
         copySize = size;
     memcpy(newptr, ptr, copySize);
-    
-    /* Free old block */
+
     mm_free(ptr);
     return newptr;
 }
@@ -285,7 +366,7 @@ static void place(void *bp, size_t asize) {
         PUT(FTRP(next_bp), PACK(csize - asize, 0));
         
         /* Add remainder to free list */
-        add_to_free_list(next_bp);
+        coalesce(next_bp);
     } else {
         /* Use entire block */
         PUT(HDRP(bp), PACK(csize, 1));
@@ -293,64 +374,20 @@ static void place(void *bp, size_t asize) {
     }
 }
  
-  // 주소순 정렬 + 인접 free 병합(coalesce) 삽입
-static void add_to_free_list(void *bp) {
-    if (!bp) return;
+  static void add_to_free_list(void *bp) {
+    void *prev = NULL, *cur = free_listp;
+    while (cur && cur < bp) {
+        prev = cur;
+        cur = GET_NEXT_FREE(cur); }
 
-    // 현재 bp는 헤더/푸터에 size|alloc비트가 이미 0으로 세팅되어 있다고 가정
-    size_t size = GET_SIZE(HDRP(bp));
-
-    // (1) 주소순 위치 탐색
-    void *prev = NULL;
-    void *current = free_listp;
-    while (current && current < bp) {
-        prev = current;
-        current = GET_NEXT_FREE(current);
-    }
-    // now: prev < bp <= current (주소 기준)
-
-    // (2) 좌/우 물리 이웃과 병합 시도
-    // prev와 인접?
-    if (prev && ((char *)prev + GET_SIZE(HDRP(prev)) == (char *)bp)) {
-        // prev를 리스트에서 제거 후 병합
-        void *prev_prev = GET_PREV_FREE(prev); // 삽입 재구성을 위해 저장
-        remove_from_free_list(prev);
-
-        size += GET_SIZE(HDRP(prev));
-        bp = prev; // 병합 시 시작 주소는 prev로 이동
-
-        // 병합된 새 prev 후보는 prev_prev (주소상 더 작은 쪽)
-        prev = prev_prev;
-    }
-
-    // current와 인접?
-    if (current && ((char *)bp + size == (char *)current)) {
-        // current를 리스트에서 제거 후 병합
-        void *current_next = GET_NEXT_FREE(current); // 이후 이어줄 대상
-        remove_from_free_list(current);
-
-        size += GET_SIZE(HDRP(current));
-        current = current_next; // 오른쪽 이웃 다음 노드로 당겨옴
-    }
-
-    // (3) 병합 결과를 헤더/푸터에 반영
-    PUT(HDRP(bp), PACK(size, 0));
-    PUT(FTRP(bp), PACK(size, 0));
-
-    // (4) 최종 블록을 주소순으로 prev와 current 사이에 삽입
-    if (prev == NULL) {
-        // head 삽입
-        SET_PREV_FREE(bp, NULL);
-        SET_NEXT_FREE(bp, current);
-        if (current) SET_PREV_FREE(current, bp);
-        free_listp = bp;
-    } else {
-        // 중간/꼬리 삽입
-        SET_NEXT_FREE(bp, current);
-        SET_PREV_FREE(bp, prev);
+    SET_PREV_FREE(bp, prev);
+    SET_NEXT_FREE(bp, cur);
+    if (prev)
         SET_NEXT_FREE(prev, bp);
-        if (current) SET_PREV_FREE(current, bp);
-    }
+    else
+        free_listp = bp;
+    if (cur) 
+        SET_PREV_FREE(cur, bp);
 }
  
 /*
