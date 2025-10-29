@@ -17,7 +17,7 @@ team_t team = {
 
 #define WSIZE 4                          /* Word size in bytes */
 #define DSIZE 8                          /* Double word size */
-#define CHUNKSIZE (1 << 8)              /* Extend heap by this amount */
+#define CHUNKSIZE (1 << 12)              /* Extend heap by this amount */
 #define ALIGNMENT 8                      /* Alignment requirement */
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
@@ -41,21 +41,35 @@ team_t team = {
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
-/* Explicit free list macros - works for both 32-bit and 64-bit */
-#define GET_PREV_FREE(bp) (*(void **)(bp))
-#define GET_NEXT_FREE(bp) (*(void **)((char *)(bp) + sizeof(void *)))
-#define SET_PREV_FREE(bp, ptr) (*(void **)(bp) = (ptr))
-#define SET_NEXT_FREE(bp, ptr) (*(void **)((char *)(bp) + sizeof(void *)) = (ptr))
+/* Offset-based free list to save space (8 bytes -> 4 bytes per pointer) */
+/* Offset from heap start stored as unsigned int */
+typedef unsigned int offset_t;
+#define OFFSET_MASK 0x7fffffff
+#define NULL_OFFSET 0x7fffffff
 
-/* Minimum block size: header + prev_ptr + next_ptr + footer, aligned */
-#define MIN_BLOCK_SIZE (ALIGN(DSIZE + 2 * sizeof(void *)))
+/* Convert pointer to offset from heap start */
+#define PTR_TO_OFFSET(bp) ((bp) ? ((offset_t)((char *)(bp) - (char *)heap_start)) & OFFSET_MASK : NULL_OFFSET)
+
+/* Convert offset to pointer */
+#define OFFSET_TO_PTR(offset) ((offset == NULL_OFFSET) ? NULL : (void *)((char *)heap_start + offset))
+
+/* Free list macros using offsets */
+/* GET returns offset_t, SET takes pointer */
+#define GET_PREV_FREE(bp) (*((offset_t *)(bp)))
+#define GET_NEXT_FREE(bp) (*((offset_t *)((char *)(bp) + sizeof(offset_t))))
+#define SET_PREV_FREE(bp, ptr) (*((offset_t *)(bp)) = PTR_TO_OFFSET(ptr))
+#define SET_NEXT_FREE(bp, ptr) (*((offset_t *)((char *)(bp) + sizeof(offset_t))) = PTR_TO_OFFSET(ptr))
+
+/* Minimum block size: header + prev_offset + next_offset + footer, aligned */
+#define MIN_BLOCK_SIZE (ALIGN(DSIZE + 2 * sizeof(offset_t)))
 
 /* Rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
 
 /* Global variables */
 static void *heap_listp = NULL;    /* Pointer to first block */
-static void *free_listp = NULL;    /* Pointer to first free block */
+static void *heap_start = NULL;   /* Starting address of heap */
+static offset_t free_list_offset = NULL_OFFSET;  /* Offset to first free block */
 
 /* Function prototypes */
 static void *extend_heap(size_t words);
@@ -64,6 +78,7 @@ static void *find_fit(size_t asize);
 static void place(void *bp, size_t asize);
 static void add_to_free_list(void *bp);
 static void remove_from_free_list(void *bp);
+static void split_block(void *bp, size_t asize);
 
 /*
  * mm_init - Initialize the malloc package.
@@ -81,7 +96,8 @@ int mm_init(void) {
     
     /* Initialize pointers */
     heap_listp += (2 * WSIZE);  /* Point to prologue footer */
-    free_listp = NULL;           /* Empty free list initially */
+    heap_start = heap_listp;     /* Store heap start for offset calculations */
+    free_list_offset = NULL_OFFSET;  /* Empty free list initially */
     
     /* Extend the empty heap with a free block */
     if (extend_heap(CHUNKSIZE / WSIZE) == NULL)
@@ -178,34 +194,25 @@ void *mm_realloc(void *ptr, size_t size) {
     int prev_free = !GET_ALLOC(HDRP(prev));
     int next_free = !GET_ALLOC(HDRP(next));
 
-    /* Case 2-1: Try to extend with adjacent next block */
+    /* Case 2-1: Try next block first (no memmove needed) */
     if (next_free) {
         size_t nsize = GET_SIZE(HDRP(next));
         size_t total = oldsize + nsize;
 
         if (total >= newsize) {
             remove_from_free_list(next);
-
-            if (total - newsize >= MIN_BLOCK_SIZE) {
-                /* Split block - keep extra for new free block */
-                PUT(HDRP(ptr), PACK(newsize, 1));
-                PUT(FTRP(ptr), PACK(newsize, 1));
-
-                void *rem = NEXT_BLKP(ptr);
-                size_t rsize = total - newsize;
-                PUT(HDRP(rem), PACK(rsize, 0));
-                PUT(FTRP(rem), PACK(rsize, 0));
-                coalesce(rem);
-            } else {
-                /* Use entire combined block */
-                PUT(HDRP(ptr), PACK(total, 1));
-                PUT(FTRP(ptr), PACK(total, 1));
-            }
+            if (total - newsize < MIN_BLOCK_SIZE)
+                newsize = total;
+            
+            /* Use split_block helper to handle allocation */
+            PUT(HDRP(ptr), PACK(total, 0));
+            split_block(ptr, newsize);
+            
             return ptr;
         }
     }
 
-    /* Case 2-2: Try to merge with prev and/or next */
+    /* Case 2-2: Try merging with prev and/or next */
     if (prev_free || next_free) {
         size_t psize = prev_free ? GET_SIZE(HDRP(prev)) : 0;
         size_t nsize = next_free ? GET_SIZE(HDRP(next)) : 0;
@@ -216,8 +223,10 @@ void *mm_realloc(void *ptr, size_t size) {
             void *start = prev_free ? prev : ptr;
 
             /* Remove neighbors from free list */
-            if (prev_free) remove_from_free_list(prev);
-            if (next_free) remove_from_free_list(next);
+            if (prev_free)
+                remove_from_free_list(prev);
+            if (next_free)
+                remove_from_free_list(next);
 
             /* Move data if expanding left */
             if (start == prev) {
@@ -225,20 +234,10 @@ void *mm_realloc(void *ptr, size_t size) {
                 memmove(prev, ptr, payload);
             }
 
-            /* Place the block - split if necessary */
-            if (total - newsize >= MIN_BLOCK_SIZE) {
-                PUT(HDRP(start), PACK(newsize, 1));
-                PUT(FTRP(start), PACK(newsize, 1));
-
-                void *rem = NEXT_BLKP(start);
-                size_t rsize = total - newsize;
-                PUT(HDRP(rem), PACK(rsize, 0));
-                PUT(FTRP(rem), PACK(rsize, 0));
-                coalesce(rem);
-            } else {
-                PUT(HDRP(start), PACK(total, 1));
-                PUT(FTRP(start), PACK(total, 1));
-            }
+            /* Use split_block helper to handle allocation */
+            PUT(HDRP(start), PACK(total, 0));
+            split_block(start, newsize);
+            
             return start;
         }
     }
@@ -337,24 +336,24 @@ static void *find_fit(size_t asize) {
     size_t best_size;
      
     /* Best-fit search */
-    for (bp = free_listp; bp != NULL; bp = GET_NEXT_FREE(bp)) {
+    bp = OFFSET_TO_PTR(free_list_offset);
+    while (bp != NULL) {
         if ((best_bp == NULL || GET_SIZE(HDRP(bp)) < best_size) && GET_SIZE(HDRP(bp)) >= asize) {
             best_bp = bp;
             best_size = GET_SIZE(HDRP(bp));
         }
+        offset_t next_offset = GET_NEXT_FREE(bp);
+        bp = OFFSET_TO_PTR(next_offset);
     }
     return best_bp;
 }
  
 /*
- * place - Place block of asize bytes at start of free block bp
- *         Split if remainder would be at least minimum block size
+ * split_block - Split a block into allocated block of asize and free remainder
+ *               Called by place() and realloc()
  */
-static void place(void *bp, size_t asize) {
+static void split_block(void *bp, size_t asize) {
     size_t csize = GET_SIZE(HDRP(bp));
-    
-    /* Remove from free list first */
-    remove_from_free_list(bp);
     
     if ((csize - asize) >= MIN_BLOCK_SIZE) {
         /* Split the block */
@@ -373,23 +372,34 @@ static void place(void *bp, size_t asize) {
         PUT(FTRP(bp), PACK(csize, 1));
     }
 }
- 
-  static void add_to_free_list(void *bp) {
-    void *prev = NULL, *cur = free_listp;
-    while (cur && cur < bp) {
-        prev = cur;
-        cur = GET_NEXT_FREE(cur); }
 
-    SET_PREV_FREE(bp, prev);
-    SET_NEXT_FREE(bp, cur);
-    if (prev)
-        SET_NEXT_FREE(prev, bp);
-    else
-        free_listp = bp;
-    if (cur) 
-        SET_PREV_FREE(cur, bp);
+/*
+ * place - Place block of asize bytes at start of free block bp
+ *         Split if remainder would be at least minimum block size
+ */
+static void place(void *bp, size_t asize) {
+    /* Remove from free list first */
+    remove_from_free_list(bp);
+    
+    /* Use split_block helper to handle allocation */
+    split_block(bp, asize);
 }
  
+static void add_to_free_list(void *bp) {
+    if (bp == NULL)
+       return;
+    
+    void *first = OFFSET_TO_PTR(free_list_offset);
+    
+    SET_NEXT_FREE(bp, first);
+    SET_PREV_FREE(bp, NULL);
+    
+    if (first != NULL)
+       SET_PREV_FREE(first, bp);
+    
+    free_list_offset = PTR_TO_OFFSET(bp);
+}
+
 /*
  * remove_from_free_list - Remove block from free list
  */
@@ -397,14 +407,17 @@ static void remove_from_free_list(void *bp) {
     if (bp == NULL)
         return;
     
-    void *prev = GET_PREV_FREE(bp);
-    void *next = GET_NEXT_FREE(bp);
+    offset_t prev_offset = GET_PREV_FREE(bp);
+    offset_t next_offset = GET_NEXT_FREE(bp);
     
-    if (prev == NULL)
-        free_listp = next;
+    void *prev = OFFSET_TO_PTR(prev_offset);
+    void *next = OFFSET_TO_PTR(next_offset);
+    
+    if (prev_offset == NULL_OFFSET)
+        free_list_offset = next_offset;
     else
         SET_NEXT_FREE(prev, next);
     
-    if (next != NULL)
+    if (next_offset != NULL_OFFSET)
         SET_PREV_FREE(next, prev);
 }
